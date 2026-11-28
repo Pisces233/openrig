@@ -14,6 +14,7 @@ import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { pinnedTileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { pinnedTileAttachArgv0723 } from "../src/domain/terminal/earlier-tile-attach-0723.js";
+import { pinnedTileAttachArgv0724 } from "../src/domain/terminal/earlier-tile-attach-0724.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -732,6 +733,8 @@ describe("follow views kept from an earlier release", () => {
     ["0.7.10 sizing", (seat: string) => tileAttachArgv0710("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false)],
     // 0.7.23's pinned tile, before its script gave the size back itself: still OpenRig's own, so it gets the same step.
     ["0.7.23 pinned", (seat: string) => pinnedTileAttachArgv0723("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat)],
+    // 0.7.24's pinned tile, before its script waited at start for a missing seat session.
+    ["0.7.24 pinned", (seat: string) => pinnedTileAttachArgv0724("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat)],
   ] as const)("with Herdr's pinned tiles, a kept %s follow view is kept and names the explicit reopen step", async (_label, earlier) => {
     const f = fixture();
     f.setTransform(view => ({ ...view, opened: view.opened.map(p => {

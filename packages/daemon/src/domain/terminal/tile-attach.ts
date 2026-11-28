@@ -1,6 +1,7 @@
 import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "./earlier-tile-attach.js";
 import { tileAttachArgv0711 } from "./earlier-tile-attach-0711.js";
 import { pinnedTileAttachArgv0723 } from "./earlier-tile-attach-0723.js";
+import { pinnedTileAttachArgv0724 } from "./earlier-tile-attach-0724.js";
 import { WINDOW_SIZE_PRIOR_OPTION } from "../../terminal/window-pin.js";
 
 /** The window options recording a seat's standing size pin, as a writable tile sets it: the seat's width and height. */
@@ -21,15 +22,16 @@ export function tileAttachArgv(
     : tileAttachArgv0710(tmux, server, session, false, retrySeconds);
 }
 
-/** Whether a kept tile is the one an earlier release generated for the same seat: exactly the command 0.7.23's pinned
- * writable tile, pre-reflow 0.7.11's, 0.7.10's, 0.7.9's, or 0.7.5-0.7.8's, script makes for the current tile's session,
- * tmux, server and read-only intent. An upgrade changes only OpenRig's own script; any other difference, an edited script
- * included, is a different attachment. */
+/** Whether a kept tile is the one an earlier release generated for the same seat: exactly the command 0.7.24's or
+ * 0.7.23's pinned writable tile, pre-reflow 0.7.11's, 0.7.10's, 0.7.9's, or 0.7.5-0.7.8's, script makes for the current
+ * tile's session, tmux, server and read-only intent. An upgrade changes only OpenRig's own script; any other difference,
+ * an edited script included, is a different attachment. */
 export function earlierTileAttachment(kept: readonly string[], current: readonly string[], readOnly: boolean): boolean {
   if (current.length < 6) return false;
   const [session, tmux, ...server] = current.slice(4) as [string, string, ...string[]];
+  const pinned0724 = (t: string, s: readonly string[], n: string, ro: boolean) => ro ? [] : pinnedTileAttachArgv0724(t, s, n);
   const pinned0723 = (t: string, s: readonly string[], n: string, ro: boolean) => ro ? [] : pinnedTileAttachArgv0723(t, s, n);
-  return [pinned0723, tileAttachArgv0711, tileAttachArgv0710, tileAttachArgv079, tileAttachArgv078].some((make) => {
+  return [pinned0724, pinned0723, tileAttachArgv0711, tileAttachArgv0710, tileAttachArgv079, tileAttachArgv078].some((make) => {
     const earlier = make(tmux, server, session, readOnly);
     return earlier.length === kept.length && earlier.every((word, i) => word === kept[i]);
   });
@@ -87,9 +89,13 @@ export function pinnedTileAttachArgv(
     `giveback() { "$@" display-message -p -t "\${snapshot#* }:" "#{window_id} #{window-size} w#{${w}} h#{${h}} p#{${WINDOW_SIZE_PRIOR_OPTION}}" 2>/dev/null | {`,
     'read -r gid gws gw gh gp || exit 0;',
     '[ "$gws" = manual ] && [ "$gw" != w ] && [ "$gp" = p ] && "$@" resize-window -t "$gid" -x "${gw#w}" -y "${gh#h}" 2>/dev/null; }; };',
-    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || { exec "$@" attach -t "=$target"; };`,
-    // display-message may succeed with empty/fallback context for a missing target.
-    `if [ "\${snapshot#*:}" != "$target" ]; then exec "$@" attach -t "=$target"; fi;`,
+    `wait_left=${retrySeconds}; snapshot=;`,
+    'while [ "$wait_left" -gt 0 ]; do',
+    'probe=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || probe=;',
+    'if [ "${probe#*:}" = "$target" ]; then snapshot=$probe; break; fi;',
+    'sleep 1; wait_left=$((wait_left - 1));',
+    'done;',
+    'if [ -z "$snapshot" ]; then exec "$@" attach -t "=$target"; fi;',
     'snapshot=${snapshot%%:*};',
     // From here the seat is known: a hangup or TERM ends the tile with its size given back.
     'trap "giveback \\"\\$@\\"; exit 0" HUP TERM;',
