@@ -263,11 +263,30 @@ describe("what the preparation notice carries", () => {
       await reportPreparationFailure(db, queue, prep("writer@rr", { mapPath: current, context: { usedPercentage: 97, sampledAt: "2026-11-25T21:00:00Z" } }));
       const body = noticesAbout(queue, "writer@rr")[0]!.body;
       expect(body).toContain("Latest context sample: 97% used of the context window Claude Code reports, sampled 2026-11-25T21:00:00Z.");
-      expect(body).toContain("wait for the next automatic attempt, though waiting has already failed 3 times");
+      expect(body).toContain("wait for the next automatic attempt, though each attempt this item's summary counts ended this way");
       expect(body).toContain(`Newest complete restore map: ${older} (attempt a1, written ${new Date(1_000_000).toISOString()}).`);
       expect(body).toContain("rig compact 'writer@rr' --skip-map once");
       expect(body).toContain("an automatic attempt always needs a complete map");
       expect(body).toContain("No input is authorized by this notice.");
+    } finally { db.close(); }
+  });
+
+  // A row's body is fixed when it's created, and each later attempt updates the summary. So the count lives in the
+  // summary only: an agent reading a notice after its fourth attempt must not find "3" in the body beside "4" on its face.
+  it.each([
+    { to: "the delegating parent", unable: [] as string[], destination: "owner@rr" },
+    { to: "the person", unable: ["owner@rr"], destination: PERSON },
+  ])("a later attempt changes the count in one place, for $to: the summary says 4 and the body states no count", async ({ unable, destination }) => {
+    const { db, queue } = world();
+    try {
+      await reportPreparationFailure(db, queue, prep("writer@rr"), unableSet(...unable));
+      await reportPreparationFailure(db, queue, prep("writer@rr", { attemptId: "a4", endedAttempts: 4 }), unableSet(...unable));
+      const [row] = noticesAbout(queue, "writer@rr");
+      expect(row).toMatchObject({ destinationSession: destination, summary: "Managed preparation for writer@rr: 4 ended unsent attempts (preparation_incomplete)" });
+      expect(row!.body).toMatch(/^Managed preparation for writer@rr: automatic attempts ended without \/compact\. /);
+      expect(row!.body).toContain("The number of ended attempts and the latest reason are in this item's summary and transition notes, which OpenRig updates after each later attempt.");
+      expect(row!.body).not.toMatch(/\b[34] ended|failed [34] times|\b[34] times\b/);
+      expect(row!.body).toContain("When this notice opened:");
     } finally { db.close(); }
   });
 
