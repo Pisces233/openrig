@@ -21,3 +21,12 @@ exact candidate/evidence and uncertainty. Pre-edit approval and independent QA
 are required only when selected; do not ask an idle QA seat to authorize each
 increment. When a selected check finds a defect, repair it and recheck the affected
 outcome without adding a generic second review ladder.
+
+Give review or any other work to a teammate as a queue row: `rig queue handoff`
+of the row you hold, which keeps its return route, or `rig queue create` with the
+work. A new row takes the route only when the rows you hold name one route;
+otherwise pass `--return-route <that address>` (`rig queue show <your row> --full`
+names it). A row with no return route ends with a reply paragraph naming the
+person's seat instead: copy that paragraph into the new row, as it asks. Then the
+teammate's questions and prompts reach the person. Don't
+steer a teammate with sends into its terminal.

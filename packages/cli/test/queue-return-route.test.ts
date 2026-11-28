@@ -53,9 +53,9 @@ describe("queue create --return-route", () => {
     expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: conversation-3f2a9c1b7e44@kernel. This work's questions "
       + "and its seats' prompts (not choice dialogs) come there as tasks. At each wake, before anything else, check that address first: "
       + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' rig queue list --owned --state pending,in-progress, and put "
-      + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' in front of your other queue commands for this work. Where the openrig plugin's "
-      + "hooks run, they bring these tasks by themselves. Elsewhere, where your app wakes you when a background command ends, start this wait "
-      + "in the background now, and again after you handle each task: until "
+      + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' in front of your other queue commands for this work. Where your app wakes you "
+      + "when a background command ends, start this wait in the background now, and again after you handle each task, with the openrig plugin "
+      + "too (its hooks check only for two hours after each Claude Code turn): until "
       + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' rig queue list --owned --state pending --json 2>/dev/null | grep -q '\"qitemId\"'; do sleep 20; done"]);
   });
 
@@ -169,9 +169,9 @@ describe("queue create --return-route", () => {
     await run(respond("front@kernel"), []);
     expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: front@kernel. This work's questions and its seats' prompts "
       + "(not choice dialogs) come there as tasks. At each wake, before anything else, check that address first: "
-      + "OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress. Where the openrig plugin's hooks run, they "
-      + "bring these tasks by themselves. Elsewhere, where your app wakes you when a background command ends, start this wait in the background "
-      + "now, and again after you handle each task: until OPENRIG_SESSION_NAME='front@kernel' "
+      + "OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress. Where your app wakes you when a background "
+      + "command ends, start this wait in the background now, and again after you handle each task, with the openrig plugin too (its hooks "
+      + "check only for two hours after each Claude Code turn): until OPENRIG_SESSION_NAME='front@kernel' "
       + "rig queue list --owned --state pending --json 2>/dev/null | grep -q '\"qitemId\"'; do sleep 20; done"]);
   });
 

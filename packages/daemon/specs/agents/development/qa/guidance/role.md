@@ -13,6 +13,11 @@ your profile are capabilities, not a mandatory reading list. No composition mean
 light Part A. Role names and idle seats add no gates. Explicit rigor and authored
 wave boundaries retain their named checks.
 
+Your work comes to you as a queue row. If your queue holds only OpenRig's
+information-only notice that the team was recorded, wait for a row assigned to
+you rather than starting a review on your own: work that isn't a row carries no
+return route, so the person never sees the prompts it raises.
+
 ## Working contract
 
 Read the relevant diff and exercise the public journey. Compare promised and

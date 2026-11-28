@@ -52,6 +52,9 @@ source and its reply paragraph do); otherwise the
 registered human channel. A terminal attachment, the shared TUI included, is not
 a person's address. When you finish work that has a `returnRoute` yourself, send the result there
 as a task before you close it: a close by itself doesn't reach that conversation.
+When the team's work needs something only the person can give (a choice that's theirs to make,
+such as a commit identity), ask them with a question row to that return address before you hold the
+work, and say what's waiting on them. Don't hold it silently or decide it for them.
 
 A registered person who writes to you (a row from their `<id>@external` address,
 however it reached you) is one of the people you work for. Answer them where
@@ -445,9 +448,11 @@ configurations, as below; do not take the pin from a cached page summary.
     with the prompt's own text and choices verbatim, the seat, what it was doing
     and the escalation's id, and block the escalation on it
     (`rig queue block <escalation id> --on <task id>`) so their answer wakes
-    you. Pass on their recorded words as below, starting the `--reason` with
-    `task <id>:`, then close the escalation with the key you sent and what the
-    seat did. Never leave it on the shared TUI or wait in this pane for someone
+    you (if the block is refused because they've already answered, read their
+    answer on that task and carry on). Pass on their recorded words as below,
+    starting the `--reason` with `task <id>:`, then close the escalation with the
+    key you sent and what the seat did. Never leave it on the shared TUI or wait
+    in this pane for someone
     who answers elsewhere. If you hold no route (no return address, nobody
     registered, nobody talking to you here), say so plainly here and on the
     escalation; don't name a recipient you haven't reached.

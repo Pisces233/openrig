@@ -1620,13 +1620,14 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 `(not choice dialogs) go to that conversation as tasks.`);
             } else {
               // Slice 15: the wording proven in place on real runs: check the address at each wake, first, and start the wait
-              // where the app wakes on a background command's end. Not where the openrig plugin's hooks run: they're a wake
-              // already, and the wait would be a second one for the same task (#3964).
+              // where the app wakes on a background command's end, with the openrig plugin too. #3964 left the wait out where
+              // the plugin's hooks run, to spare a second wake for the same task, but in Claude Code the hooks check only for
+              // two hours after each turn, so a later task waited for the person. A second wake costs a turn.
               console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks. ` +
                 `At each wake, before anything else, check that address first: OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
                 (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : ".") +
-                ` Where the openrig plugin's hooks run, they bring these tasks by themselves. Elsewhere, where your app wakes you when a background ` +
-                `command ends, start this wait in the background now, and again after you handle each task: ` +
+                ` Where your app wakes you when a background command ends, start this wait in the background now, and again after ` +
+                `you handle each task, with the openrig plugin too (its hooks check only for two hours after each Claude Code turn): ` +
                 `until OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done`);
             }
           }

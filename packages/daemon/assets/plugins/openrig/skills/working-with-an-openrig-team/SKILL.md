@@ -38,7 +38,8 @@ behave; this skill is the loop around them.
   because your seat has no terminal and `rig send` can't reach it:
 
   > To ask me anything, create a queue item to `<your seat>` (`rig queue create --destination <your seat> ...`), then
-  > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
+  > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. If
+  > the block is refused because I've already answered, read my answer on that item and carry on. I
   > check it whenever the person talks to me. Don't ask in your own terminal: the person isn't there. A seat's
   > permission prompt in this work is their question too: send me its own text and choices, the seat, what it was
   > doing and any escalation's id, unless a question about that prompt is already open at my seat. Whoever sent the
@@ -49,12 +50,19 @@ behave; this skill is the loop around them.
   > stays a no. If they gave no answer, or their words don't clearly
   > pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything, and
   > never pick a "don't ask again" choice they didn't pick. Check the effect, and never send again while it's
-  > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
-  > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
-  > evidence ref.
+  > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. Commit
+  > only as an author the person gave you, one they approved when you proposed it, or the one the repository already
+  > has (`git config user.name` and `user.email`); if there's none, ask me, and never choose one without their say.
+  > When you finish, put the outcome in this item's resolution, with what
+  > the latest review found, and any file in its evidence ref.
 - With an address of this chat's own (`returnRoute` in the result), with or without a seat, end the body with the result
   route instead:
 
+  > Commit only as an author the person gave you, one they approved when you proposed it, or the one the repository
+  > already has (`git config user.name` and `user.email`); if there's none, ask the person with a task to this item's
+  > return route and block this item on it (`rig queue block <this id> --on <question id>`), so their answer wakes
+  > you (if the block is refused because they've already answered, read their answer on that task and carry on), and
+  > never choose one without their say.
   > When you finish, send the result as a task to this item's return route (`rig queue show <this id>` names it):
   > `rig queue create --destination <that address> --summary "<the result in a line>" --body-file <file>`. Then
   > close this item with the result. A close by itself doesn't reach the person's chat, and the task does. If you
@@ -95,7 +103,9 @@ task, without anyone asking you to check.
 - A Codex whose `codex queue` has no `--resume` (Codex 0.171.0 has it) gets the tasks at this chat's next turn, not
   while it's idle. The hooks say so once in the chat: tell the person in plain words.
 - The hooks read only the addresses recorded under this chat's key, from OpenRig's own record, and check them for new
-  tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat.
+  tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat. In
+  Claude Code they check for up to two hours after each turn, so for work that stays open longer, keep the background
+  wait the rigs skill gives, or check when the person comes back.
 - Each one says it came from OpenRig's hook bridge and names its sender as OpenRig recorded it. It's a task like any
   other: show it to the person and record their words, as below.
 - A wake comes only when your turn ends, so while the team works, end your turn rather than watching its seats
