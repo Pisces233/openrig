@@ -104,7 +104,8 @@ person needs in their project or home folder and name that path.
 
 ## 1. Install OpenRig, if it isn't installed
 
-- **Check first:** `rig --version`. If it prints a version, go to the openrig plugin below.
+- **Check first:** `rig --version`. If it prints a version, run `rig doctor`; when its `rig_login_shell` row warns, give
+  the person its Fix. Then go to the openrig plugin below.
 - **What it needs:** macOS or Linux, Node.js 22 or 24, tmux, and Claude Code or Codex signed in. Check only what's
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
 - **A check that needs the network** (`gh auth status`, a registry or other fetch) can fail falsely in a sandbox without
@@ -129,10 +130,14 @@ person needs in their project or home folder and name that path.
   numbered or not, counts as one dialog, so the offer is the only choice in its message. If your app asks with a choice
   dialog, give it a dialog of its own and list installing it first, since a dialog marks its first option; the person
   can still say no.
-  **Before you offer it, check that `rig` resolves:** `command -v rig`. The plugin's hooks and its MCP server run the
-  `rig` on PATH, else the project's own `node_modules/.bin/rig`. If OpenRig is installed only inside the project
-  (`command -v rig` prints nothing), say in the offer that the plugin finds it only in sessions started in this project,
-  or first recommend an install every session finds (the global install above).
+  **Before you offer it, check that `rig` resolves:** `command -v rig`, and the `rig_login_shell` row of the `rig doctor`
+  you ran above. The plugin's hooks and its MCP server run an executable `OPENRIG_RIG_BIN` first, else the `rig` on PATH, else
+  the project's own `node_modules/.bin/rig`, else the first on a login shell's PATH. If OpenRig is installed only inside
+  the project (`command -v rig` prints nothing, and that row says a login shell doesn't find it either), say in the offer
+  that the plugin finds it only in sessions started in this project, or first recommend an install every session finds
+  (the global install above). Your shell isn't an app's: an app started outside a terminal, such as Claude Desktop's Code
+  tab, finds `rig` through a login shell, which is the lookup that row checks (setup's end lists it when it warns); when
+  it warns, give the person its Fix before the offer.
   Bundled, it reads as skippable, and the person can't tell what they'd lose. Before running anything, tell the person in
   plain words:
   - **What it adds:** when I hand the team work, its questions come into this conversation without you telling me to

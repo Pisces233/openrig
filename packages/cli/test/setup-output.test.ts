@@ -214,6 +214,31 @@ describe("the installer's setup boundary", () => {
   });
 });
 
+// Setup runs doctor's checks at its end. A login shell that doesn't find `rig` is listed under "Some steps need
+// attention" with its Fix, and setup stays ready: it's a warning, never a gate.
+it("setup lists doctor's rig_login_shell warning with its Fix and stays ready", async () => {
+  doctor.checks = [{ name: "rig_login_shell", status: "warn",
+    message: "rig runs in this shell (/home/sam/.npm-global/bin/rig), but a login shell (zsh -l) doesn't find it.",
+    fix: "Add its folder to PATH in ~/.zprofile: export PATH=\"/home/sam/.npm-global/bin:$PATH\", then restart the app." }];
+  try {
+    process.exitCode = undefined;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 503 })));
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.map(String).join(" ")); });
+    const deps: SetupDeps = { platform: "darwin", env: {}, exec: vi.fn((cmd: string) => cmd === "cmux capabilities --json" ? '{"capabilities":[]}' : "available"),
+      readFile: () => null, exists: () => false, writeFile: vi.fn(), mkdirp: vi.fn() };
+    await new Command().addCommand(setupCommand(deps)).parseAsync(["node", "rig", "setup", "--providers", "claude"]);
+    const output = logs.join("\n");
+    expect(process.exitCode).toBeUndefined();
+    expect(output).toContain("Setup complete.");
+    const attention = output.slice(output.indexOf("Some steps need attention:"));
+    expect(attention).toContain("rig_login_shell: rig runs in this shell (/home/sam/.npm-global/bin/rig), but a login shell (zsh -l) doesn't find it.");
+    expect(attention).toContain("Fix: Add its folder to PATH in ~/.zprofile");
+  } finally {
+    doctor.checks = [];
+  }
+});
+
 // A whole setup run, where the person asked for one: --router-line beside another setup option, a --json run that says
 // what it's doing while it works, and the daemon's default address on a machine with Tailscale.
 describe("setup's whole run: the router line beside other options, --json progress, the daemon address", () => {

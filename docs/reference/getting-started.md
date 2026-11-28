@@ -89,8 +89,13 @@ For a tarball or manual Node install on Linux, put its bin directory on PATH in
 in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
 `~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
 there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
-Check `bash -lc 'command -v node rig'`: both paths must appear in the output.
-Use Codex's tool shell for this check if it differs from Bash.
+Check `env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -lc 'command -v node rig'`: both
+paths must appear in the output. It starts from the PATH an app starts with on Linux, so only your login file can add
+to it; a login shell started from this terminal would also find what this terminal's PATH already has. Use Codex's tool
+shell for this check if it differs from Bash. For `rig`, `rig doctor`'s `rig_login_shell` row below is the same check.
+`rig doctor`, and the end of `rig setup`, check `rig` in your own login shell (the `rig_login_shell` row): that's where
+an app started outside a terminal, such as Claude Desktop's Code tab, looks it up. A warning there gives the line for
+your shell and the `OPENRIG_RIG_BIN` alternative; restart the app after the change.
 
 On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where

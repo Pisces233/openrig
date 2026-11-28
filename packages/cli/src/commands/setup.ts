@@ -1036,11 +1036,13 @@ tmux scrollback:
       // the primary surface for the new-operator sequence (status/doctor only
       // HINT back to it; the durable reference is docs/reference/getting-started.md).
       // A failed doctor check also leaves setup not ready, so it's named below. So is the port check's warning, though setup
-      // stays ready: the configured port's daemon isn't confirmed as this user's, such as another user's daemon. Provider
+      // stays ready: the configured port's daemon isn't confirmed as this user's, such as another user's daemon. So is a login
+      // shell that doesn't find rig, where an app such as Claude Desktop's Code tab looks it up (a warning only). Provider
       // checks are the setup steps themselves, reused, so they aren't listed twice.
       const stepIds = new Set(result.steps.map(step => step.id));
+      const warnsAtSetup = new Set(["port", "rig_login_shell"]);
       const doctorAttention = result.verification?.checks.filter(check => !stepIds.has(check.name)
-        && (check.status === "fail" || (check.name === "port" && check.status === "warn"))) ?? [];
+        && (check.status === "fail" || (warnsAtSetup.has(check.name) && check.status === "warn"))) ?? [];
       const listChecks = () => {
         for (const check of doctorAttention) {
           console.log(`  ${check.name}: ${check.message}`);

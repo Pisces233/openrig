@@ -56,7 +56,11 @@ describe("doctor default executor", () => {
     expect(capture.map(([command]) => command.replace(/openrig-check-\d+/, "openrig-check-N"))).toEqual([
       "tmux -L openrig-check-N -f /dev/null new-session -d -s check", "tmux -L openrig-check-N -f /dev/null kill-server"]);
     expect(capture.every(([,options]) => options.timeout === TMUX_CAPTURE_PROBE_TIMEOUT_MS)).toBe(true);
-    const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command) && !command.includes(" -L openrig-check-"));
+    // rig_login_shell's login shell is a new probe, bounded as the openrig plugin bounds it (10 s).
+    const login = calls.filter(([command]) => command.includes("__OPENRIG_LOGIN_PATH__"));
+    expect(login.map(([, options]) => options.timeout)).toEqual([10_000]);
+    const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command) && !command.includes(" -L openrig-check-")
+      && !command.includes("__OPENRIG_LOGIN_PATH__"));
     expect(prior.some(([command]) => command === "tmux list-sessions")).toBe(true);
     expect(prior.every(([,options]) => !Object.hasOwn(options, "timeout"))).toBe(true);
     const auth = calls.filter(([command]) => /^(claude|codex) /.test(command));

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
@@ -17,6 +17,8 @@ import {
 import { buildTmuxCaptureFailure, buildTmuxControlFailure, buildTmuxVersionCheckFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
+import { findRig, loginShellPath } from "@openrig/daemon/rig-lookup";
+import { shellQuote, shellWord } from "../cross-host-executor.js";
 import { classifyNodeVersion } from "../node-support.js";
 import { checkProviderReadiness } from "../provider-auth.js";
 import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
@@ -59,6 +61,42 @@ export interface DoctorDeps {
   specPath?: string;
   /** Live seat ids (`<pod>.<member>`) for the spec's rig; null when the topology cannot be read. */
   fetchLiveLogicalIds?: (rigName: string) => Promise<string[] | null>;
+  /** Where `rig` resolves, read with the openrig plugin's own lookup (#4064). Default: that lookup, with the login shell
+   *  run through `exec`, and the real file system's realpath. */
+  rigLookup?: RigLookup;
+}
+
+export interface RigLookup {
+  /** OPENRIG_RIG_BIN when it names an executable `rig`, else the first executable `rig` on PATH; null when there's none. */
+  findRig: (opts: { env: NodeJS.ProcessEnv }) => string | null;
+  /** The PATH a login shell of this user gets; null when none answers. */
+  loginShellPath: (opts: { env: NodeJS.ProcessEnv }) => string | null;
+  realpath: (file: string) => string;
+  /** Starts `file --version` with that PATH, as the plugin starts a login shell's `rig`; what failed when it doesn't.
+   *  Default: through doctor's `exec`, bounded at 10 s. */
+  starts?: (file: string, opts: { PATH: string }) => { ok: true } | { ok: false; detail: string };
+  /** The `node` this doctor runs on, named in the repair when a login PATH lacks one (default: process.execPath). */
+  nodeBin?: () => string;
+}
+
+const RIG_START_TIMEOUT_MS = 10_000;
+
+/** Starts `rig --version` with a login shell's PATH through doctor's runner: the npm `rig` runs on the `node` that PATH
+ *  gives it, so a `rig` the lookup finds can still fail to start. The first line it printed says why. */
+function startsThroughExec(deps: DoctorDeps): NonNullable<RigLookup["starts"]> {
+  return (file, { PATH }) => {
+    try {
+      deps.exec(["env", `PATH=${PATH}`, file, "--version"].map(shellQuote).join(" "), { timeoutMs: RIG_START_TIMEOUT_MS });
+      return { ok: true };
+    } catch (error) {
+      const e = error as { stderr?: unknown; stdout?: unknown; code?: unknown; signal?: unknown };
+      if (e.code === "ETIMEDOUT" || (e.signal && !String(e.stderr ?? "").trim())) return { ok: false, detail: `it didn't answer within ${RIG_START_TIMEOUT_MS / 1000} s` };
+      // What it printed on stderr, else on stdout: a rig can say why it won't start on either.
+      const first = (out: unknown) => String(out ?? "").split("\n").map((row) => row.trim()).find(Boolean);
+      const line = first(e.stderr) ?? first(e.stdout);
+      return { ok: false, detail: (line ?? "it exited with an error").slice(0, 200) };
+    }
+  };
 }
 
 const DEFAULT_PORT = 7433;
@@ -298,6 +336,9 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     reason: writableCheck.reason,
     fix: writableCheck.fix,
   });
+
+  // `rig` where an app started outside a terminal looks it up: a warning at most.
+  checks.push(buildRigLoginShellCheck(deps));
 
   // 7. Port availability (async) — daemon already running on that port counts as OK.
   // OPR.0.4.7 slice-05 item-4b: resolve the daemon host+port ONCE from config and use
@@ -598,6 +639,115 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
     reason: "The cmux control probe failed in the daemon, although it succeeded in this shell.",
     fix: "Check that cmux is running and allows this user to control it, then rerun `rig doctor` to re-probe. If it still fails, inspect the daemon log with `rig daemon logs`.",
   };
+}
+
+/** The plugin's lookup (#4064), with its login shell run through doctor's `exec`, so a test's runner stays in charge. */
+function defaultRigLookup(deps: DoctorDeps): RigLookup {
+  // `exec` runs with this process's environment, so the PATH the login shell starts from goes on the command line.
+  const spawnSync = (file: string, args: string[], options: { env?: NodeJS.ProcessEnv; timeout: number }) => {
+    const argv = [...(options.env?.PATH !== undefined ? ["env", `PATH=${options.env.PATH}`] : []), file, ...args];
+    try {
+      return { status: 0, stdout: deps.exec(argv.map(shellQuote).join(" "), { timeoutMs: options.timeout }) };
+    } catch (error) {
+      return { status: 1, stdout: "", error };
+    }
+  };
+  return {
+    findRig: ({ env }) => findRig({ env }),
+    loginShellPath: ({ env }) => loginShellPath({ env, spawnSync }),
+    realpath: (file) => realpathSync(file),
+  };
+}
+
+/** The PATH an app started outside a terminal begins with, before its login shell's profile: launchd's default for a Mac's
+ *  apps, and the usual system default elsewhere. */
+function appStartPath(platform: NodeJS.Platform): string {
+  return platform === "darwin" ? "/usr/bin:/bin:/usr/sbin:/sbin" : "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+}
+
+/** The line that puts `dir` on a login shell's PATH: zsh reads ~/.zprofile in a login shell and ~/.zshrc only in an
+ *  interactive one; a login bash reads the first of ~/.bash_profile, ~/.bash_login and ~/.profile, never ~/.bashrc; fish
+ *  reads config.fish in every shell. */
+function loginPathLine(shell: string, dir: string): string {
+  const literalDir = dir.replace(/[\\$`\"]/g, "\\$&");
+  if (shell === "zsh") return `in ~/.zprofile: export PATH="${literalDir}:$PATH"`;
+  if (shell === "bash") return `in ~/.bash_profile (or ~/.profile when there's no ~/.bash_profile or ~/.bash_login): export PATH="${literalDir}:$PATH"`;
+  // Apply to each shell's PATH even when config.fish resets it and fish_user_paths already contains the directory, and
+  // move a directory PATH already holds to the front: without --move, fish_add_path leaves it where it is.
+  if (shell === "fish") return `in ~/.config/fish/config.fish: fish_add_path --path --move ${shellWord(dir)}`;
+  return `in ~/.profile: export PATH="${literalDir}:$PATH"`;
+}
+
+/** The @openrig/cli package a file belongs to, found by walking up from it; null when there's none to read. */
+function openrigCliPackage(start: string, readFile: DoctorDeps["readFile"]): string | null {
+  let dir = start;
+  for (let i = 0; i < 8; i++) {
+    try {
+      if ((JSON.parse(readFile(path.join(dir, "package.json")) ?? "null") as { name?: unknown } | null)?.name === "@openrig/cli") return dir;
+    } catch { /* not a package here */ }
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+  return null;
+}
+
+/** `rig` where an app started outside a terminal looks it up. Claude Desktop's Code tab, or any app that runs the openrig
+ *  plugin, finds `rig` the way the plugin does (#4064): OPENRIG_RIG_BIN or PATH in the app's own environment, then a
+ *  login shell's PATH. This terminal can find `rig` while a login shell doesn't, so the check reads the login shell, with
+ *  the plugin's own lookup. A warning at most: it reads, never rewrites a profile, and never fails doctor or setup. It
+ *  checks the lookup, not an app itself. */
+function buildRigLoginShellCheck(deps: DoctorDeps): DoctorCheck {
+  const name = "rig_login_shell";
+  const env = deps.env ?? process.env;
+  const lookup = deps.rigLookup ?? defaultRigLookup(deps);
+  const shell = path.basename(String(env.SHELL || "/bin/sh"));
+  // The plugin uses an explicit executable before either PATH lookup. A login probe need not answer for it to work.
+  const configured = env.OPENRIG_RIG_BIN ? lookup.findRig({ env: { OPENRIG_RIG_BIN: env.OPENRIG_RIG_BIN, PATH: "" } }) : null;
+  if (configured) {
+    return { name, status: "pass",
+      message: `OPENRIG_RIG_BIN names an executable rig (${configured}), selected before PATH or a login shell: an app finds it when it starts with OPENRIG_RIG_BIN in its own environment, not only in this shell. This checks the lookup, not an app itself.` };
+  }
+  // An app's login shell starts from the app's own PATH, not this terminal's; a login profile usually adds to the PATH it
+  // starts with, so starting from this terminal's would find whatever this terminal finds.
+  const loginPath = lookup.loginShellPath({ env: { ...env, PATH: appStartPath(deps.platform ?? process.platform) } });
+  if (loginPath === null) {
+    return { name, status: "skipped", message: `Couldn't read a login shell's PATH (${shell} -l), so where apps find rig wasn't checked.` };
+  }
+  const atLogin = lookup.findRig({ env: { PATH: loginPath } });
+  const here = lookup.findRig({ env: { PATH: String(env.PATH ?? "") } });
+  const nodeDir = path.dirname((lookup.nodeBin ?? (() => process.execPath))());
+  // A login shell run from this terminal inherits this terminal's PATH and can find rig before any repair; doctor starts
+  // the login shell from the app's PATH, so the check is this row itself, run by the rig the person ran: plain `rig` only
+  // when this terminal's rig is that one. An OPENRIG_RIG_BIN set only for the app isn't in this terminal's environment.
+  const verify = (sameRig: boolean) => `Check with: ${sameRig ? "rig" : "<the full path of the rig you just ran>"} doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here).`;
+  if (atLogin) {
+    // Found is not started: the npm `rig` runs on the `node` the login PATH gives it, as the plugin runs it.
+    const started = (lookup.starts ?? startsThroughExec(deps))(atLogin, { PATH: loginPath });
+    if (!started.ok) {
+      return { name, status: "warn",
+        message: `A login shell (${shell} -l) finds rig at ${atLogin}, but it doesn't start with that shell's PATH (${started.detail}). Apps that look rig up through a login shell, such as Claude Desktop's Code tab, can't start it, so the team's questions won't come into those conversations by themselves.`,
+        fix: `rig runs on node, so the login PATH needs node too: put node's folder (this shell's node is in ${nodeDir}) on PATH ${loginPathLine(shell, nodeDir)}, then restart the app. ${verify(here !== null)}` };
+    }
+    const own = openrigCliPackage(deps.baseDir, deps.readFile);
+    let theirs: string | null = null;
+    try { theirs = openrigCliPackage(path.dirname(lookup.realpath(atLogin)), deps.readFile); } catch { /* can't tell */ }
+    if (own && theirs && own !== theirs) {
+      // Name this terminal's rig only when it's the install running now: `/opt/new/bin/rig doctor` run by its path, with
+      // the old install on this terminal's PATH too, would otherwise get the old one named.
+      let ran: string | null = null;
+      try { if (here && openrigCliPackage(path.dirname(lookup.realpath(here)), deps.readFile) === own) ran = here; } catch { /* can't tell */ }
+      return { name, status: "warn",
+        message: `A login shell (${shell} -l) finds a different rig, ${atLogin} (from ${theirs}), from the one running now (${own}). Apps that look rig up through a login shell, such as Claude Desktop's Code tab, run that one.`,
+        fix: `Put the folder that holds this rig first on PATH ${loginPathLine(shell, ran ? path.dirname(ran) : "<the folder that holds the rig you just ran>")}, or set OPENRIG_RIG_BIN to ${ran ? shellWord(ran) : "the full path of the rig you just ran"} in the environment the app starts with; then restart the app. ${verify(ran !== null)}` };
+    }
+    return { name, status: "pass",
+      message: `A login shell (${shell} -l) finds rig at ${atLogin}, and it starts with that shell's PATH, so apps that look rig up the way the openrig plugin does, such as Claude Desktop's Code tab, can start it too. This checks the lookup, not an app itself.` };
+  }
+  const dir = here ? path.dirname(here) : "<the folder that holds rig: the bin inside the one `npm prefix -g` prints>";
+  return { name, status: "warn",
+    message: `${here ? `rig runs in this shell (${here}), but a login shell (${shell} -l) doesn't find it` : `Neither this shell's PATH nor a login shell's (${shell} -l) has rig`}. Apps that look rig up through a login shell, such as Claude Desktop's Code tab, won't find it, so the team's questions won't come into those conversations by themselves.`,
+    fix: `Put rig's folder on PATH ${loginPathLine(shell, dir)}${nodeDir !== dir ? `, and node's folder too if the login PATH lacks it (this shell's node is in ${nodeDir}), since rig runs on node` : ""}, then restart the app; or set OPENRIG_RIG_BIN to ${here ? shellWord(here) : "the full path of rig"} in the environment the app starts with. ${verify(here !== null)}` };
 }
 
 /** The standalone doctor's command runner. A command with `timeoutMs` is bounded (the tmux capture probe passes one); others

@@ -1015,3 +1015,280 @@ describe("#161 tmux control mode", () => {
     expect(await controlCheck(older)).toMatchObject({ status: "skipped", message: expect.stringContaining("didn't say") });
   });
 });
+
+// An app started outside a terminal (Claude Desktop's Code tab, say) finds `rig` the way the openrig plugin does: its own
+// environment's OPENRIG_RIG_BIN and PATH, then a login shell's PATH. A delivered install had `rig`'s folder on this
+// terminal's PATH only, so the Code tab never heard the team. Doctor (and setup, which runs doctor's checks) says so.
+describe("rig_login_shell: does a login shell find rig, where apps look it up", () => {
+  const NPM_BIN = "/home/sam/.npm-global/bin";
+  const RIG = `${NPM_BIN}/rig`;
+  // The plugin's lookup, faked: OPENRIG_RIG_BIN when it runs, else the first `rig` on PATH that runs.
+  const lookup = (opts: { login: string | null; rigs: string[]; realpath?: Record<string, string> }) => ({
+    findRig: ({ env }: { env: NodeJS.ProcessEnv }) => {
+      if (env.OPENRIG_RIG_BIN && opts.rigs.includes(env.OPENRIG_RIG_BIN)) return env.OPENRIG_RIG_BIN;
+      return String(env.PATH ?? "").split(":").filter(Boolean).map((dir) => `${dir}/rig`).find((file) => opts.rigs.includes(file)) ?? null;
+    },
+    loginShellPath: () => opts.login,
+    realpath: (p: string) => opts.realpath?.[p] ?? p,
+  });
+  const check = (overrides: Partial<DoctorDeps>) =>
+    runDoctorChecks(makeDeps({ env: { SHELL: "/bin/zsh", HOME: "/home/sam", PATH: `${NPM_BIN}:/usr/bin:/bin` }, ...overrides }))
+      .checks.find((c) => c.name === "rig_login_shell");
+
+  it("rig runs in this shell but a login shell doesn't find it: a warning, never a failure, with the zsh login-file line, the restart and OPENRIG_RIG_BIN", () => {
+    const row = check({ rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [RIG] }) });
+    expect(row).toMatchObject({ status: "warn" });
+    expect(row?.message).toContain(`rig runs in this shell (${RIG}), but a login shell (zsh -l) doesn't find it`);
+    expect(row?.message).toContain("Claude Desktop's Code tab");
+    expect(row?.fix).toContain(`in ~/.zprofile: export PATH="${NPM_BIN}:$PATH"`);
+    expect(row?.fix).toContain("then restart the app");
+    expect(row?.fix).toContain(`or set OPENRIG_RIG_BIN to ${RIG} in the environment the app starts with`);
+    // The check starts from the app's PATH, as this row does: a login shell run from this terminal inherits rig's folder.
+    expect(row?.fix).toContain("Check with: rig doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here).");
+    expect(row?.fix).not.toContain("-lc 'command -v");
+  });
+
+  it.each([
+    ["/bin/bash", `in ~/.bash_profile (or ~/.profile when there's no ~/.bash_profile or ~/.bash_login): export PATH="${NPM_BIN}:$PATH"`, "Check with: rig doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here)."],
+    ["/usr/bin/fish", `in ~/.config/fish/config.fish: fish_add_path --path --move ${NPM_BIN}`, "Check with: rig doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here)."],
+    ["/bin/ksh", `in ~/.profile: export PATH="${NPM_BIN}:$PATH"`, "Check with: rig doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here)."],
+  ])("%s gets its own login-file line", (shell, line, verify) => {
+    const row = check({ env: { SHELL: shell, HOME: "/home/sam", PATH: `${NPM_BIN}:/usr/bin:/bin` }, rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [RIG] }) });
+    expect(row?.status).toBe("warn");
+    expect(row?.fix).toContain(line);
+    expect(row?.fix).toContain(verify);
+  });
+
+  it("a login shell finds this rig: it passes, says where, and says it checks the lookup, not an app", () => {
+    const row = check({ rigLookup: lookup({ login: `${NPM_BIN}:/usr/bin:/bin`, rigs: [RIG] }) });
+    expect(row).toMatchObject({ status: "pass" });
+    expect(row?.message).toContain(`A login shell (zsh -l) finds rig at ${RIG}`);
+    expect(row?.message).toContain("This checks the lookup, not an app itself.");
+    expect(row?.fix).toBeUndefined();
+  });
+
+  it("an OPENRIG_RIG_BIN that runs is honoured, with what an app needs for it", () => {
+    const bin = "/opt/openrig/bin/rig";
+    const row = check({ env: { SHELL: "/bin/zsh", HOME: "/home/sam", PATH: "/usr/bin:/bin", OPENRIG_RIG_BIN: bin }, rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [bin] }) });
+    expect(row).toMatchObject({ status: "pass" });
+    expect(row?.message).toContain(`OPENRIG_RIG_BIN names an executable rig (${bin})`);
+    expect(row?.message).toContain("an app finds it when it starts with OPENRIG_RIG_BIN in its own environment, not only in this shell");
+  });
+
+  it("a login shell that finds a different OpenRig install: a warning naming both", () => {
+    const old = "/usr/local/bin/rig";
+    const row = check({
+      baseDir: "/home/sam/.npm-global/lib/node_modules/@openrig/cli/dist/commands",
+      readFile: (p) => p.endsWith("/@openrig/cli/package.json") ? '{"name":"@openrig/cli"}' : null,
+      rigLookup: lookup({ login: "/usr/local/bin:/usr/bin:/bin", rigs: [RIG, old], realpath: {
+        [old]: "/usr/local/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+        [RIG]: "/home/sam/.npm-global/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+      } }),
+    });
+    expect(row).toMatchObject({ status: "warn" });
+    expect(row?.message).toContain(`A login shell (zsh -l) finds a different rig, ${old} (from /usr/local/lib/node_modules/@openrig/cli), from the one running now (/home/sam/.npm-global/lib/node_modules/@openrig/cli)`);
+    // This terminal's rig is the running install, so the Fix names its folder.
+    expect(row?.fix).toContain(`Put the folder that holds this rig first on PATH in ~/.zprofile: export PATH="${NPM_BIN}:$PATH"`);
+    expect(row?.fix).toContain(`or set OPENRIG_RIG_BIN to ${RIG}`);
+  });
+
+  // `/opt/new/bin/rig doctor` run by its path, while this terminal's PATH and the login shell both find the old install:
+  // naming this terminal's rig would keep apps on the old one, so the Fix names the rig the person just ran instead.
+  it("a different install, when this terminal's rig isn't the running one: the Fix names the rig just run, not the terminal's", () => {
+    const old = "/usr/local/bin/rig";
+    const row = check({
+      env: { SHELL: "/bin/zsh", HOME: "/home/sam", PATH: "/usr/local/bin:/usr/bin:/bin" },
+      baseDir: "/opt/new/lib/node_modules/@openrig/cli/dist/commands",
+      readFile: (p) => p.endsWith("/@openrig/cli/package.json") ? '{"name":"@openrig/cli"}' : null,
+      rigLookup: lookup({ login: "/usr/local/bin:/usr/bin:/bin", rigs: [old], realpath: {
+        [old]: "/usr/local/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+      } }),
+    });
+    expect(row).toMatchObject({ status: "warn" });
+    expect(row?.message).toContain("from the one running now (/opt/new/lib/node_modules/@openrig/cli)");
+    expect(row?.fix).toContain('export PATH="<the folder that holds the rig you just ran>:$PATH"');
+    expect(row?.fix).toContain("or set OPENRIG_RIG_BIN to the full path of the rig you just ran");
+    expect(row?.fix).not.toContain("/usr/local/bin:$PATH");
+    expect(row?.fix).not.toContain(`OPENRIG_RIG_BIN to ${old}`);
+    // `rig doctor` here would run this terminal's old install, so the check names the rig just run.
+    expect(row?.fix).toContain("Check with: <the full path of the rig you just ran> doctor (after the PATH change");
+    expect(row?.fix).not.toContain("Check with: rig doctor");
+  });
+
+  it("rig on neither this shell's PATH nor a login shell's: the check runs the rig just run, since rig doctor isn't on this PATH yet", () => {
+    const row = check({ env: { SHELL: "/bin/zsh", HOME: "/home/sam", PATH: "/usr/bin:/bin" }, rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [] }) });
+    expect(row).toMatchObject({ status: "warn" });
+    expect(row?.message).toContain("Neither this shell's PATH nor a login shell's (zsh -l) has rig");
+    expect(row?.fix).toContain("Check with: <the full path of the rig you just ran> doctor (after the PATH change");
+    expect(row?.fix).not.toContain("Check with: rig doctor");
+  });
+
+  it.each([null, "/usr/local/bin:/usr/bin:/bin", `${NPM_BIN}:/usr/bin:/bin`])(
+    "a working explicit executable takes precedence even when the login path is %s", (login) => {
+      const bin = "/opt/chosen rig/bin/rig";
+      const base = lookup({ login, rigs: [bin, RIG, "/usr/local/bin/rig"] });
+      const loginProbe = vi.fn(base.loginShellPath);
+      const row = check({ env: { SHELL: "/bin/zsh", PATH: `${NPM_BIN}:/usr/bin:/bin`, OPENRIG_RIG_BIN: bin },
+        rigLookup: { ...base, loginShellPath: loginProbe } });
+      expect(row).toMatchObject({ status: "pass" });
+      expect(row?.message).toContain(`OPENRIG_RIG_BIN names an executable rig (${bin})`);
+      expect(row?.message).toContain("in its own environment");
+      expect(loginProbe).not.toHaveBeenCalled();
+    });
+
+  it("an unusable explicit executable still checks the login path", () => {
+    const row = check({ env: { SHELL: "/bin/zsh", PATH: `${NPM_BIN}:/usr/bin:/bin`, OPENRIG_RIG_BIN: "/missing/rig" },
+      rigLookup: lookup({ login: `${NPM_BIN}:/usr/bin:/bin`, rigs: [RIG] }) });
+    expect(row).toMatchObject({ status: "pass", message: expect.stringContaining(`finds rig at ${RIG}`) });
+  });
+
+  it("quotes a fish repair path containing spaces", () => {
+    const dir = "/home/sam/My Tools/bin";
+    const row = check({ env: { SHELL: "/usr/bin/fish", PATH: `${dir}:/usr/bin:/bin` },
+      rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [`${dir}/rig`] }) });
+    expect(row?.fix).toContain(`fish_add_path --path --move '${dir}'`);
+  });
+
+  it("the fish repair still finds rig on later logins when config.fish sets PATH", async (ctx) => {
+    const { spawnSync } = await import("node:child_process");
+    if (spawnSync("fish", ["--version"]).status !== 0) { ctx.skip(); return; }
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const home = fs.mkdtempSync(path.join(tmpdir(), "openrig-fish-login-"));
+    try {
+      const dir = path.join(home, 'My Tools $v `literal` "quoted"', "bin");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "rig"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const row = check({ env: { SHELL: "/usr/bin/fish", PATH: dir },
+        rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [path.join(dir, "rig")] }) });
+      const repair = row?.fix?.match(/fish_add_path .*?(?=, and node|, then restart)/)?.[0];
+      expect(repair).toBeDefined();
+      const config = path.join(home, ".config", "fish");
+      fs.mkdirSync(config, { recursive: true });
+      fs.writeFileSync(path.join(config, "config.fish"), `set -gx PATH /usr/bin /bin\n${repair}\n`);
+      for (let i = 0; i < 3; i++) {
+        const result = spawnSync("fish", ["-lc", "command -v rig"], {
+          env: { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), PATH: process.env.PATH }, encoding: "utf8", timeout: 10_000,
+        });
+        expect(result.status, `login ${i}: ${result.stderr}`).toBe(0);
+        expect(result.stdout.trim()).toBe(path.join(dir, "rig"));
+      }
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("the fish repair for a different install puts this rig first when the login PATH already holds its folder behind the other", async (ctx) => {
+    const { spawnSync } = await import("node:child_process");
+    const fish = spawnSync("sh", ["-c", "command -v fish"], { encoding: "utf8" }).stdout.trim();
+    if (!fish) { ctx.skip(); return; }
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const home = fs.mkdtempSync(path.join(tmpdir(), "openrig-fish-first-"));
+    try {
+      const other = path.join(home, "old", "bin");
+      const dir = path.join(home, "My Tools", "bin");
+      for (const d of [other, dir]) {
+        fs.mkdirSync(d, { recursive: true });
+        fs.writeFileSync(path.join(d, "rig"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      }
+      // The app's login PATH finds the other install first and holds this rig's folder after it.
+      const loginPath = `${other}:${dir}:/usr/bin:/bin`;
+      const row = check({ env: { SHELL: "/usr/bin/fish", HOME: home, PATH: `${dir}:/usr/bin:/bin` },
+        baseDir: "/new/lib/node_modules/@openrig/cli/dist/commands",
+        readFile: (p) => p.endsWith("/@openrig/cli/package.json") ? '{"name":"@openrig/cli"}' : null,
+        rigLookup: lookup({ login: loginPath, rigs: [path.join(other, "rig"), path.join(dir, "rig")], realpath: {
+          [path.join(other, "rig")]: "/old/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+          [path.join(dir, "rig")]: "/new/lib/node_modules/@openrig/cli/dist/bin-wrapper.js",
+        } }) });
+      expect(row?.message).toContain("finds a different rig");
+      const repair = row?.fix?.match(/fish_add_path .*?(?=, or set OPENRIG_RIG_BIN)/)?.[0];
+      expect(repair).toBeDefined();
+      const config = path.join(home, ".config", "fish");
+      fs.mkdirSync(config, { recursive: true });
+      fs.writeFileSync(path.join(config, "config.fish"), `${repair}\n`);
+      for (let i = 0; i < 3; i++) {
+        const result = spawnSync(fish, ["-lc", "command -v rig"], {
+          env: { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), PATH: loginPath }, encoding: "utf8", timeout: 10_000,
+        });
+        expect(result.status, `login ${i}: ${result.stderr}`).toBe(0);
+        expect(result.stdout.trim()).toBe(path.join(dir, "rig"));
+      }
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it.each(["zsh", "bash"])("the %s repair preserves literal dollar and backtick characters in the directory", (shell) => {
+    const dir = '/home/sam/Tools $v `literal` "quoted"/bin';
+    const row = check({ env: { SHELL: `/bin/${shell}`, PATH: `${dir}:/usr/bin:/bin` },
+      rigLookup: lookup({ login: "/usr/bin:/bin", rigs: [`${dir}/rig`] }) });
+    expect(row?.fix).toContain('export PATH="/home/sam/Tools \\$v \\`literal\\` \\"quoted\\"/bin:$PATH"');
+  });
+
+  it("the login shell starts from an app's PATH, not this terminal's, so this terminal's rig can't make it pass", () => {
+    const seen: Array<string | undefined> = [];
+    const base = lookup({ login: "/usr/bin:/bin", rigs: [RIG] });
+    const row = check({ platform: "darwin", rigLookup: { ...base, loginShellPath: ({ env }) => { seen.push(env.PATH); return "/usr/bin:/bin"; } } });
+    expect(seen).toEqual(["/usr/bin:/bin:/usr/sbin:/sbin"]);
+    expect(row?.status).toBe("warn");
+  });
+
+  // Found is not started: the npm `rig` runs on the `node` the login PATH gives it, as the plugin starts it. A login PATH
+  // with `rig`'s folder and no `node` (nvm loaded only in ~/.zshrc, say) passed the lookup while the app's rig couldn't start.
+  it("a login shell finds rig but it doesn't start there: a warning saying what failed, with node's repair line", () => {
+    const nvm = "/home/sam/.nvm/versions/node/v22.14.0/bin";
+    const row = check({ rigLookup: { ...lookup({ login: `${NPM_BIN}:/usr/bin:/bin`, rigs: [RIG] }),
+      starts: () => ({ ok: false, detail: "/usr/bin/env: 'node': No such file or directory" }), nodeBin: () => `${nvm}/node` } });
+    expect(row).toMatchObject({ status: "warn" });
+    expect(row?.message).toContain(`A login shell (zsh -l) finds rig at ${RIG}, but it doesn't start with that shell's PATH (/usr/bin/env: 'node': No such file or directory)`);
+    expect(row?.fix).toContain(`in ~/.zprofile: export PATH="${nvm}:$PATH"`);
+    expect(row?.fix).toContain("then restart the app");
+    expect(row?.fix).toContain("Check with: rig doctor (after the PATH change this row reads OK; an OPENRIG_RIG_BIN set only for the app isn't visible here).");
+  });
+
+  it("the rig a login shell finds is started once, with that shell's PATH, before it passes", () => {
+    const login = `${NPM_BIN}:/usr/bin:/bin`;
+    const calls: Array<[string, string]> = [];
+    const row = check({ rigLookup: { ...lookup({ login, rigs: [RIG] }), starts: (file, { PATH }) => { calls.push([file, PATH]); return { ok: true }; } } });
+    expect(calls).toEqual([[RIG, login]]);
+    expect(row).toMatchObject({ status: "pass" });
+    expect(row?.message).toContain("and it starts with that shell's PATH");
+  });
+
+  it("by default it starts the found rig through doctor's runner, bounded at 10 s, and reads why from what it printed", () => {
+    const seen: Array<[string, number | undefined]> = [];
+    const row = check({
+      exec: (cmd: string, opts?: { timeoutMs?: number }) => {
+        seen.push([cmd, opts?.timeoutMs]);
+        if (cmd.includes("'--version'")) throw Object.assign(new Error("Command failed"), { status: 127, stderr: "/usr/bin/env: 'node': No such file or directory\n" });
+        return "";
+      },
+      rigLookup: lookup({ login: `${NPM_BIN}:/usr/bin:/bin`, rigs: [RIG] }),
+    });
+    expect(seen).toContainEqual([`'env' 'PATH=${NPM_BIN}:/usr/bin:/bin' '${RIG}' '--version'`, 10_000]);
+    expect(row).toMatchObject({ status: "warn", message: expect.stringContaining("(/usr/bin/env: 'node': No such file or directory)") });
+  });
+
+  it("a rig that fails to start and says why only on stdout: the warning quotes that line", () => {
+    const row = check({
+      exec: (cmd: string) => {
+        if (cmd.includes("'--version'")) throw Object.assign(new Error("Command failed"), { status: 1, stderr: "", stdout: "\nrig: this build needs Node 22 or newer\n" });
+        return "";
+      },
+      rigLookup: lookup({ login: `${NPM_BIN}:/usr/bin:/bin`, rigs: [RIG] }),
+    });
+    expect(row).toMatchObject({ status: "warn", message: expect.stringContaining("(rig: this build needs Node 22 or newer)") });
+  });
+
+  it("no login shell answers: skipped, saying it wasn't checked", () => {
+    expect(check({ rigLookup: lookup({ login: null, rigs: [RIG] }) })).toMatchObject({ status: "skipped", message: expect.stringContaining("Couldn't read a login shell's PATH (zsh -l)") });
+  });
+
+  it("by default it reads the login shell through doctor's own command runner, so a test's runner stays in charge", () => {
+    const seen: string[] = [];
+    const row = check({ exec: (cmd: string) => { seen.push(cmd); return ""; } });
+    expect(row?.status).toBe("skipped");
+    const probe = seen.find((cmd) => cmd.includes("-lc") && cmd.includes("__OPENRIG_LOGIN_PATH__"));
+    // The login shell starts from an app's PATH (darwin here), set on the command line since the runner keeps this environment.
+    expect(probe?.startsWith("'env' 'PATH=/usr/bin:/bin:/usr/sbin:/sbin' '/bin/zsh' '-lc'")).toBe(true);
+  });
+});
