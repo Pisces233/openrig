@@ -388,6 +388,179 @@ export function authList(paths: CodexAuthPaths): string[] {
   }
 }
 
+export type AuthSignOutResult =
+  | {
+      ok: true;
+      /** "absent" when the selected file is gone; "unchecked" when its login could not be identified, so nothing was changed. */
+      target: "profile" | "active" | "absent" | "unchecked";
+      /** "incomplete" when anything was left unchecked or not removed; "absent" when the selected file is gone. */
+      outcome: "signed_out" | "incomplete" | "absent";
+      removedActive: boolean;
+      removedProfiles: string[];
+      /** Copies of the login that couldn't be removed (named by their place in the home). */
+      notRemoved: string[];
+      /** Saved profiles kept because they hold another login (another person, workspace or API key). */
+      keptProfiles: number;
+      /** Absent target only: saved profiles left in the home, not checked, since there was no login to compare them with. */
+      savedProfiles?: number;
+      /** Entries kept because whose login they hold couldn't be checked: not a plain file, unreadable, not a login, or a
+       *  login without the person or workspace needed to tell it apart. */
+      unchecked: string[];
+      note: string;
+    }
+  | { ok: false; reason: "invalid_profile" };
+
+export const SIGN_OUT_NOTE = "Checked locations: auth.json and auth-profiles/*.json in this Codex home. Other locations are not scanned. "
+  + "This local cleanup doesn't revoke the login at OpenAI. "
+  + "Native Codex logout, this local cleanup and revocation at the provider are separate operations.";
+
+/** A candidate login file's bytes, read through one descriptor opened without following a link and checked to be a plain,
+ *  single-link file, with the inode it was read from; null otherwise. The caller scrubs the buffer. */
+function readLoginFile(p: string): { bytes: Buffer; dev: number; ino: number } | null {
+  let fd = -1;
+  try {
+    const before = lstatSafe(p);
+    if (!before?.isFile() || before.nlink !== 1) return null;
+    // A non-regular entry must not wait for a writer, including one replacing the file after this check.
+    fd = fs.openSync(p, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
+    return st.isFile() && st.nlink === 1 ? { bytes: fs.readFileSync(fd), dev: st.dev, ino: st.ino } : null;
+  } catch { return null; } finally { if (fd >= 0) try { fs.closeSync(fd); } catch { /* ignore */ } }
+}
+
+/** Whose login a Codex auth file holds: the ChatGPT workspace (tokens.account_id, else the id_token's chatgpt_account_id;
+ *  null when neither) and the person in it, read from the id_token's auth claims as Codex reads them (chatgpt_user_id,
+ *  else user_id; null when the record has none or the token doesn't decode). null for an API-key login, undefined when it
+ *  cannot identify a login. In memory only; never returned or printed. */
+function loginIdentity(bytes: Buffer): { workspace: string | null; person: string | null } | null | undefined {
+  try {
+    const login = JSON.parse(bytes.toString("utf8")) as {
+      tokens?: { account_id?: unknown; id_token?: unknown; access_token?: unknown; refresh_token?: unknown }; OPENAI_API_KEY?: unknown } | null;
+    const tokens = login?.tokens;
+    const claims = tokenAuthClaims(tokens?.id_token);
+    // Codex fills account_id from the id_token's chatgpt_account_id at login, and may store it as null.
+    const workspace = nonEmpty(tokens?.account_id) ?? nonEmpty(claims?.chatgpt_account_id);
+    const person = nonEmpty(typeof claims?.chatgpt_user_id === "string" ? claims.chatgpt_user_id : claims?.user_id);
+    if (workspace !== null || [tokens?.id_token, tokens?.access_token, tokens?.refresh_token].some((t) => nonEmpty(t) !== null)) return { workspace, person };
+    return nonEmpty(login?.OPENAI_API_KEY) !== null ? null : undefined;
+  } catch { return undefined; }
+}
+
+function nonEmpty(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/** The id_token payload's "https://api.openai.com/auth" claims; null when it doesn't decode as Codex decodes it. */
+function tokenAuthClaims(idToken: unknown): { chatgpt_user_id?: unknown; user_id?: unknown; chatgpt_account_id?: unknown } | null {
+  const parts = typeof idToken === "string" ? idToken.split(".") : [];
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) return null;
+  try {
+    const payload = Buffer.from(parts[1]!, "base64url");
+    // Buffer's decoder is forgiving; Codex requires canonical URL_SAFE_NO_PAD.
+    if (payload.toString("base64url") !== parts[1]) return null;
+    const auth = (JSON.parse(payload.toString("utf8")) as Record<string, unknown> | null)?.["https://api.openai.com/auth"];
+    return auth && typeof auth === "object" ? auth as { chatgpt_user_id?: unknown; user_id?: unknown; chatgpt_account_id?: unknown } : null;
+  } catch { return null; }
+}
+
+/** Sign out one login from one Codex home: remove the active auth.json and every saved profile holding the same login,
+ *  whatever saved it (rig auth save, a provider switch's before-switch copy, or a sign-in page's account pool). The login
+ *  is the named profile's, or the active auth.json's when none is named. Same login means the same person in the same
+ *  ChatGPT workspace (tokens.account_id, else the id_token's chatgpt_account_id, as Codex fills it), so a refreshed copy
+ *  counts and a colleague's login in that workspace stays. When a person or workspace needed to tell two logins apart is
+ *  missing, only the selected file and byte-identical copies go, and the logins it can't tell apart stay as unchecked. An
+ *  API-key login matches only byte-identical copies. Other logins, other homes and
+ *  anything not read as a login stay. Anything unchecked or not removed makes the outcome incomplete. Nothing is
+ *  revoked at the provider (SIGN_OUT_NOTE). A sign-in page keeping its own account pool in this store should match by
+ *  the same rule; change them together. */
+export function authSignOut(paths: CodexAuthPaths, profile?: string): AuthSignOutResult {
+  if (profile !== undefined && !validateProfileName(profile)) return { ok: false, reason: "invalid_profile" };
+  const targetPath = profile === undefined ? paths.activeAuth : path.join(paths.profileDir, `${profile}.json`);
+  const result = { ok: true as const, target: (profile === undefined ? "active" : "profile") as "profile" | "active",
+    outcome: "signed_out" as "signed_out" | "incomplete", removedActive: false, removedProfiles: [] as string[], notRemoved: [] as string[],
+    keptProfiles: 0, unchecked: [] as string[], note: SIGN_OUT_NOTE };
+  const targetLabel = profile === undefined ? "auth.json" : `auth-profiles/${profile}.json`;
+  const uncheckedTarget = (label = targetLabel): AuthSignOutResult => ({ ...result, target: "unchecked", outcome: "incomplete",
+    unchecked: [...new Set([...result.unchecked, label])] });
+  // A profile folder that is a link, or resolves outside the home, is never listed or read through: it is named unchecked.
+  // Recheck at each use: the folder can change after the selected or a candidate file was read.
+  // Once observed unchecked, leave it alone for the rest of this operation and name it only once.
+  let uncheckedProfiles = false;
+  const profileDirUnchecked = (): boolean => {
+    if (!uncheckedProfiles) {
+      const dir = lstatSafe(paths.profileDir);
+      if (dir !== null && (dir.isSymbolicLink() || !realDirContained(paths.profileDir, paths.codexHome))) {
+        uncheckedProfiles = true;
+        result.unchecked.push("auth-profiles/");
+      }
+    }
+    return uncheckedProfiles;
+  };
+  if (profileDirUnchecked() && profile !== undefined) return uncheckedTarget("auth-profiles/");
+  try { fs.lstatSync(targetPath); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR"
+      ? { ...result, target: "absent", outcome: "absent", ...(profileDirUnchecked() ? {} : { savedProfiles: authList(paths).length }) } : uncheckedTarget();
+  }
+  const read = readLoginFile(targetPath);
+  if (read === null) return uncheckedTarget();
+  const target = read.bytes, id = loginIdentity(target);
+  if (id === undefined) { target.fill(0); return uncheckedTarget(); }
+  const candidates: Array<{ file: string; name: string | null; label: string }> = [];
+  if (lstatSafe(paths.activeAuth) !== null) candidates.push({ file: paths.activeAuth, name: null, label: "auth.json" });
+  if (!profileDirUnchecked()) try {
+    for (const n of fs.readdirSync(paths.profileDir).filter((f) => f.endsWith(".json")).sort()) {
+      candidates.push({ file: path.join(paths.profileDir, n), name: n.slice(0, -".json".length), label: `auth-profiles/${n}` });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") result.unchecked.push("auth-profiles/");
+  }
+  // The selected file was already read. Use the listed name that is that same file (another spelling of it on a
+  // case-insensitive volume), or keep its identity even if it disappeared from the listing.
+  const selected = candidates.find((c) => c.file === targetPath)
+    ?? candidates.find((c) => {
+      if (c.name !== null && profileDirUnchecked()) return false;
+      const st = lstatSafe(c.file); return st !== null && st.dev === read.dev && st.ino === read.ino;
+    });
+  if (!selected) candidates.push({ file: targetPath, name: profile ?? null, label: targetLabel });
+  const selectedFile = selected?.file ?? targetPath;
+  try {
+    for (const c of candidates) {
+      if (c.name !== null && profileDirUnchecked()) continue;
+      const copy: ReturnType<typeof readLoginFile> = c.file === selectedFile ? read : readLoginFile(c.file);
+      if (copy === null) { result.unchecked.push(c.label); continue; }
+      if (c.name !== null && profileDirUnchecked()) {
+        if (copy !== read) copy.bytes.fill(0);
+        continue;
+      }
+      const held = loginIdentity(copy.bytes);
+      let same: boolean, unclassified = held === undefined;
+      if (id === null) same = copy.bytes.equals(target);
+      else if (!held) same = false;
+      // Another login: a known workspace or a known person differs.
+      else if ((id.workspace !== null && held.workspace !== null && held.workspace !== id.workspace)
+        || (id.person !== null && held.person !== null && held.person !== id.person)) same = false;
+      // The same login: the same known workspace and the same known person.
+      else if (id.workspace !== null && held.workspace !== null && id.person !== null && held.person !== null) same = true;
+      else { same = copy.bytes.equals(target); unclassified = !same; }   // not enough to tell: identical copies only
+      if (copy !== read) copy.bytes.fill(0);
+      if (!same) {
+        if (unclassified) result.unchecked.push(c.label);
+        else if (c.name !== null) result.keptProfiles++;
+        continue;
+      }
+      // Remove the file that was read: one swapped in since (another inode) is left alone and named.
+      const now = lstatSafe(c.file);
+      if (now === null || !now.isFile() || now.nlink !== 1 || now.dev !== copy.dev || now.ino !== copy.ino) { result.notRemoved.push(c.label); continue; }
+      if (c.name !== null && profileDirUnchecked()) continue;
+      try { fs.unlinkSync(c.file); } catch { result.notRemoved.push(c.label); continue; }
+      if (c.name === null) result.removedActive = true; else result.removedProfiles.push(c.name);
+    }
+  } finally { target.fill(0); }
+  if (result.unchecked.length || result.notRemoved.length) result.outcome = "incomplete";
+  return result;
+}
+
 // --- Auth-B: seat -> profile METADATA registry (product-native; NO resume_token per orch D2) ---
 
 /** Stated in command output + docs: a seat label is metadata, never proof of a live account. */

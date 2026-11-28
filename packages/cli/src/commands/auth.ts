@@ -9,6 +9,7 @@ import {
   authList,
   authSave,
   authSwitch,
+  authSignOut,
   authValidate,
   authSeatSet,
   authSeatsList,
@@ -123,6 +124,50 @@ cross the connection.`)
       console.log(`active_mode: ${r.mode}`);
       console.log("note: Restored saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
       console.log(`note: ${r.note}`);
+    });
+
+  withRuntime(auth.command("sign-out"))
+    .description("Remove one Codex login's matching active and saved login files (auth.json, auth-profiles/*.json) from a Codex home.")
+    .option("--profile <profile>", "Sign out the login saved in this profile (default: the active login)")
+    .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
+    .option("--json", "Print the result as JSON (names and counts only)")
+    .addHelpText("after", `
+Removes the active auth.json, if it holds that login, and the saved profiles (auth-profiles/*.json) holding the same
+login, whatever saved them: rig auth save, a provider switch's before-switch copy, or another application using that
+profile store. The same login means the same person in the same ChatGPT workspace, so a refreshed copy counts and a
+colleague's login in a shared workspace stays. An API-key login matches only identical copies. Other logins and other
+homes stay, and other locations in the home aren't scanned.
+
+Files it can't check are kept and named: links, unreadable files, files that aren't a login, and logins it can't tell
+apart from this one because a person or workspace is missing. If any are left, or a copy couldn't be removed, it reports
+the sign-out as incomplete and exits 1. Run again, it reports that the profile (or active login) it was given is gone.
+
+It doesn't revoke the login at OpenAI. Native Codex logout, this local cleanup and revocation at the provider are separate
+operations. Codex sessions already running keep their login until restarted, and a login kept in the OS keyring isn't in
+these files. A sign-in, refresh or switch running at the same moment isn't covered. To remove saved profiles after the
+active auth.json has gone, name one that's still there with --profile.`)
+    .action((opts: { runtime: string; profile?: string; codexHome?: string; json?: boolean }) => {
+      if (!ensureRuntime(opts.runtime)) return;
+      const r = authSignOut(paths(opts.codexHome), opts.profile);
+      if (opts.json) {
+        console.log(JSON.stringify(r));
+        if (!r.ok || r.outcome === "incomplete") process.exitCode = 1;
+        return;
+      }
+      if (!r.ok) return fail(r.reason);
+      const which = opts.profile ? `the login saved in ${opts.profile}` : "the active login";
+      console.log(r.target === "absent" ? `signed_out: nothing (${opts.profile ? `no profile named ${opts.profile}` : "no active login"} in this home)`
+        : r.target === "unchecked" ? `incomplete: nothing removed (${which} could not be checked)`
+        : r.outcome === "incomplete" ? `incomplete: ${which} (see ${[r.notRemoved.length ? "not_removed" : "", r.unchecked.length ? "unchecked" : ""].filter(Boolean).join(" and ")})`
+        : `signed_out: ${which}`);
+      console.log(`removed_active: ${r.removedActive ? "yes" : "no"}`);
+      console.log(`removed_profiles: ${r.removedProfiles.length ? r.removedProfiles.join(", ") : "none"}`);
+      if (r.notRemoved.length) console.log(`not_removed: ${r.notRemoved.join(", ")}`);
+      if (r.savedProfiles !== undefined) console.log(`saved_profiles: ${r.savedProfiles} (not checked; name one with --profile to sign out the login it holds)`);
+      else if (r.target !== "absent") console.log(`kept_profiles: ${r.keptProfiles}`);
+      if (r.unchecked.length) console.log(`unchecked (kept; couldn't check whose login): ${r.unchecked.join(", ")}`);
+      console.log(`note: ${r.note}`);
+      if (r.outcome === "incomplete") process.exitCode = 1;
     });
 
   withRuntime(auth.command("validate <profile>"))
